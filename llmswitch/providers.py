@@ -117,6 +117,9 @@ TYPES: dict[str, dict] = {
     "antigravity": {
         "label": "Gemini via Antigravity CLI (abbonamento)", "auth": "cli",
         "api": "cli", "local": True, "base_url": "", "command": "agy -p",
+        # Unico dei tre CLI a saper elencare i modelli: l'abbonamento non dà
+        # solo Gemini, ma anche Claude e GPT-OSS.
+        "models_command": "agy models",
         "note": "Sostituisce il `gemini` CLI, chiuso agli account individuali "
                 "(IneligibleTierError). ~11s a risposta.",
     },
@@ -411,12 +414,33 @@ def _gemini_models(base_url: str, api_key: str, token: str = "") -> list[dict]:
 
 
 def _cli_models(prov: dict, spec: dict) -> list[dict]:
-    """Provider "CLI ufficiale": nessun endpoint da interrogare, si verifica
-    solo che il comando esista."""
+    """Provider "CLI ufficiale": nessun endpoint da interrogare.
+
+    Se il CLI sa elencare i suoi modelli (`models_command`) si usa quello:
+    Antigravity, per esempio, dà accesso non solo a Gemini ma anche a Claude e
+    GPT-OSS, e sceglierli a mano sarebbe indovinare."""
+    import subprocess
     cmd = (prov.get("base_url") or spec.get("command") or "").split()
     exe = cmd[0] if cmd else ""
     if not exe or shutil.which(exe) is None:
         raise RuntimeError(f"comando '{exe or '?'}' non trovato nel PATH")
+    elenco = (spec.get("models_command") or "").split()
+    if elenco:
+        try:
+            p = subprocess.run(elenco, capture_output=True, text=True, timeout=60,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            out = []
+            for riga in (p.stdout or "").splitlines():
+                # "id<TAB>Etichetta"; le righe di servizio non hanno il tab.
+                if "	" not in riga:
+                    continue
+                mid, _, label = riga.partition("	")
+                if mid.strip():
+                    out.append({"id": mid.strip(), "label": label.strip() or mid.strip()})
+            if out:
+                return out
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log.debug("`%s` non ha risposto: %s", " ".join(elenco), e)
     scelto = (prov.get("model") or "").strip()
     return [{"id": scelto or "default",
              "label": scelto or "(quello configurato nel CLI)"}]
