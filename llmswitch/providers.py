@@ -234,15 +234,27 @@ class Registry:
         pid = (data.get("assignments") or {}).get(consumer) or ""
         return self._find(data, pid) if pid else None
 
-    def endpoint_for(self, consumer: str) -> tuple[str, str, str] | None:
+    def endpoint_for(self, consumer: str, embedding: bool = False
+                     ) -> tuple[str, str, str] | None:
         """(base_url, api_key, modello) per un client OpenAI-compatibile.
 
-        Sui provider LOCALI il modello lo decide `LocalEngines.resolve`, con la
-        regola della VRAM: qui torna già risolto."""
+        Con `embedding=True` torna `embed_model` invece di `model`: chi
+        vettorizza non è chi conversa, e usare lo stesso campo manderebbe un
+        LLM alla /embeddings.
+
+        Sui provider LOCALI il modello di chat lo decide `LocalEngines.resolve`,
+        con la regola della VRAM: qui torna già risolto."""
         prov = self.provider_for(consumer)
         if prov is None:
             return None
         spec = TYPES.get(prov.get("type") or "", {})
+        if embedding:
+            modello = (prov.get("embed_model") or "").strip()
+            if not modello:
+                return None
+            base = ((prov.get("base_url") or "").strip()
+                    or spec.get("base_url") or "").strip()
+            return base, (prov.get("api_key") or "local").strip(), modello
         if spec.get("local") and spec.get("api") != "cli":
             eng = self._engines_for(prov)
             r = eng.resolve("vllm" if prov.get("type") == "vllm" else "lmstudio")
@@ -270,6 +282,10 @@ class Registry:
                     "name": (prov.get("name") or TYPES[tipo]["label"]).strip(),
                     "base_url": (prov.get("base_url") or "").strip(),
                     "model": (prov.get("model") or "").strip(),
+                    # Il modello che VETTORIZZA è un'altra cosa da quello che
+                    # conversa: nello stesso campo, assegnare un provider sia
+                    # alla chat sia al RAG manderebbe un LLM alla /embeddings.
+                    "embed_model": (prov.get("embed_model") or "").strip(),
                     "api_key": (prov.get("api_key") or "").strip()}
             data["providers"].append(voce)
             self.save(data)
@@ -291,7 +307,7 @@ class Registry:
             prov = self._find(data, pid)
             if prov is None:
                 raise KeyError(pid)
-            for k in ("name", "base_url", "model", "api_key"):
+            for k in ("name", "base_url", "model", "embed_model", "api_key"):
                 if k in campi:
                     prov[k] = (campi[k] or "").strip()
             self.save(data)
@@ -336,6 +352,7 @@ class Registry:
                 "id": p.get("id"), "type": p.get("type"), "name": p.get("name"),
                 "base_url": p.get("base_url") or spec.get("base_url", ""),
                 "model": p.get("model", ""),
+                "embed_model": p.get("embed_model", ""),
                 "has_key": bool((p.get("api_key") or "").strip()),
                 "oauth_account": oauth.get("account", ""),
                 "oauth_connected": bool(oauth.get("access_token")),
