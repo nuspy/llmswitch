@@ -97,6 +97,19 @@ TYPES: dict[str, dict] = {
         "base_url": "https://integrate.api.nvidia.com/v1",
         "note": "Modelli di build.nvidia.com, OpenAI-compatibile.",
     },
+    # Gira sulla macchina, ma NON è `local` per questa libreria: qui `local` significa "passa
+    # dalla regola della VRAM", che si informa su `/api/v0/models` di LM Studio o sul manager
+    # vLLM. Unsloth non ha nessuno dei due e il modello lo sceglie lui all'avvio
+    # (`unsloth run --model …`), uno per volta: non c'è niente da risolvere, l'endpoint serve
+    # quello che ha caricato.
+    "unsloth": {
+        "label": "Unsloth (sul tuo computer, con chiave)", "auth": "api_key",
+        "api": "openai", "local": False,
+        "base_url": "http://localhost:8000/v1",
+        "note": "Server locale su llama.cpp. All'avvio stampa in console indirizzo e "
+                "chiave (`sk-unsloth-…`); la porta è 8000 o 8888 secondo come è stato "
+                "lanciato. Espone anche il dialetto Anthropic su /v1/messages.",
+    },
     "openai_compat": {
         "label": "Generico (OpenAI-compatibile)", "auth": "api_key",
         "api": "openai", "local": False, "base_url": "",
