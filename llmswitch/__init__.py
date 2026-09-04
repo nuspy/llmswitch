@@ -19,6 +19,18 @@ from .local import (
     same_model,
     vram_free_bytes,
 )
+from .agents import AGENTI, Agente, AgentError, genera, installati
+from .oauth import (
+    ABBONAMENTI,
+    Abbonamento,
+    Credenziali,
+    OAuthError,
+    access_token,
+    credenziali,
+    intestazioni,
+    panoramica,
+    stato,
+)
 from .providers import TYPES, Registry, default_registry_path
 
 __version__ = "0.1.0"
@@ -27,4 +39,9 @@ __all__ = [
     "LocalEngines", "LmStudioConfig", "VllmConfig", "Resolution",
     "Registry", "TYPES", "default_registry_path",
     "human_size", "same_model", "vram_free_bytes", "__version__",
+    # Abbonamenti: usare il piano che si paga già invece di una chiave a consumo.
+    "ABBONAMENTI", "Abbonamento", "Credenziali", "OAuthError",
+    "access_token", "credenziali", "intestazioni", "panoramica", "stato",
+    # CLI-agenti: gli abbonamenti che non hanno un endpoint, ma un programma.
+    "AGENTI", "Agente", "AgentError", "genera", "installati",
 ]

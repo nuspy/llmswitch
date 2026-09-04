@@ -1,6 +1,8 @@
-"""Registro dei provider LLM: locali (LM Studio, vLLM), remoti a chiave
-(OpenAI, Claude, Gemini, Grok, Z.AI, NVIDIA, generici OpenAI-compatibili) e ad
-abbonamento tramite il CLI ufficiale (Codex, Claude Code, Antigravity).
+"""Registro dei provider LLM: locali (LM Studio, vLLM, llama.cpp), remoti a
+chiave (OpenAI, Claude, Gemini, Grok, Qwen, Z.AI, NVIDIA, DeepSeek, Kimi,
+Nebius, generici OpenAI-compatibili) e ad abbonamento — sia quelli con un
+endpoint HTTP (`llmswitch.oauth`) sia quelli che sono un programma da lanciare
+(`llmswitch.agents`: Codex, Claude Code, Antigravity).
 
 Un `Registry` è un file JSON con i provider configurati e a chi sono assegnati:
 
@@ -52,9 +54,21 @@ TYPES: dict[str, dict] = {
         "base_url": "",
         "note": "Istanze del manager vLLM: una viva si riusa com'è.",
     },
+    "llamacpp": {
+        "label": "llama.cpp (llama-server)", "auth": "none", "api": "openai",
+        "local": False,
+        "base_url": "http://127.0.0.1:8080/v1",
+        # `local` è False perché la regola della VRAM non lo sa interrogare: llama-server
+        # serve il modello che gli è stato dato all'avvio, uno solo, e non ha un'API di stato
+        # come LM Studio né un manager come vLLM. Non c'è niente da risolvere.
+        "note": "Server di llama.cpp, OpenAI-compatibile. Porta 8080 salvo `--port`. "
+                "Serve il modello passato all'avvio: non se ne cambia da qui.",
+    },
     "openai": {
         "label": "OpenAI", "auth": "api_key", "api": "openai", "local": False,
         "base_url": "https://api.openai.com/v1",
+        "key_env": "OPENAI_API_KEY",
+        "console": "https://platform.openai.com/api-keys",
         "note": "API key (pay-per-use): l'abbonamento ChatGPT non copre le "
                 "chiamate di app terze.",
     },
@@ -62,6 +76,8 @@ TYPES: dict[str, dict] = {
         "label": "Claude (Anthropic)", "auth": "api_key", "api": "anthropic",
         "local": False, "base_url": "https://api.anthropic.com/v1",
         "chat_base_url": "https://api.anthropic.com/v1",
+        "key_env": "ANTHROPIC_API_KEY",
+        "console": "https://console.anthropic.com/settings/keys",
         "note": "Solo API key: dal 4 aprile 2026 i token OAuth delle "
                 "subscription non valgono fuori dai client Anthropic.",
     },
@@ -70,32 +86,134 @@ TYPES: dict[str, dict] = {
         "local": False,
         "base_url": "https://generativelanguage.googleapis.com/v1beta",
         "chat_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "key_env": "GEMINI_API_KEY",
+        "console": "https://aistudio.google.com/app/apikey",
+        "cli_creds": "~/.gemini/oauth_creds.json",
         "note": "API key oppure OAuth Google. Da settembre 2026 le API key "
                 "\"standard\" vengono rifiutate: servono le auth key.",
     },
     "grok": {
         "label": "Grok (xAI)", "auth": "either", "api": "openai", "local": False,
         "base_url": "https://api.x.ai/v1",
+        "key_env": "XAI_API_KEY",
+        "console": "https://console.x.ai/",
+        "cli_creds": "~/.grok/auth.json",
         "note": "API key, o OAuth 2.0 PKCE per usare l'abbonamento SuperGrok / "
                 "X Premium+.",
+    },
+    # Qwen ha due porte diverse, con conti diversi: la chiave di Model Studio (a consumo) e
+    # l'abbonamento via OAuth, che passa per un endpoint tutto suo.
+    "qwen": {
+        "label": "Qwen (Alibaba Model Studio)", "auth": "api_key", "api": "openai",
+        "local": False,
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "key_env": "DASHSCOPE_API_KEY",
+        "console": "https://modelstudio.console.alibabacloud.com/",
+        "note": "Endpoint internazionale. Quello cinese è "
+                "dashscope.aliyuncs.com/compatible-mode/v1, con chiavi separate.",
+    },
+    # --- abbonamenti -------------------------------------------------------------------
+    # Si paga già un piano: lo si usa, invece di aprire un conto a consumo accanto. Le
+    # credenziali arrivano da `llmswitch.oauth`, che le prende dallo strumento ufficiale già
+    # autenticato e le rinnova. Gli id coincidono con quelli di `oauth.ABBONAMENTI`.
+    "qwen_oauth": {
+        "label": "Qwen", "auth": "oauth", "api": "openai",
+        "local": False,
+        "base_url": "https://portal.qwen.ai/v1",
+        "cli_creds": "~/.qwen/oauth_creds.json",
+        "token_url": "https://chat.qwen.ai/api/v1/oauth2/token",
+        "console": "https://chat.qwen.ai/",
+        "note": "Riusa il login del CLI `qwen`: niente da incollare, ma il CLI dev'essere "
+                "già autenticato. Il tier gratuito da 2000 richieste/giorno è chiuso dal "
+                "15 aprile 2026.",
+    },
+    "codex_oauth": {
+        "label": "ChatGPT (piano Codex)", "auth": "oauth", "api": "openai",
+        "local": False,
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "cli_creds": "~/.codex/auth.json",
+        "token_url": "https://auth.openai.com/oauth/token",
+        "console": "https://chatgpt.com/",
+        "note": "Riusa il login del CLI `codex`. Il servizio pretende anche l'id dell'account, "
+                "che sta nelle stesse credenziali.",
+    },
+    "grok_oauth": {
+        "label": "Grok (SuperGrok / X Premium+)", "auth": "oauth", "api": "openai",
+        "local": False,
+        "base_url": "https://api.x.ai/v1",
+        "cli_creds": "~/.grok/auth.json",
+        "token_url": "https://auth.x.ai/oauth2/token",
+        "console": "https://grok.com/",
+        "note": "Riusa il login del CLI `grok`. I token durano circa sei ore e si rinnovano "
+                "con un'ora di anticipo, per non spirare a metà di un lavoro lungo.",
+    },
+    "gemini_oauth": {
+        "label": "Gemini (piano Google AI Pro)", "auth": "oauth", "api": "cloudcode",
+        "local": False,
+        "base_url": "https://cloudcode-pa.googleapis.com",
+        "cli_creds": "~/.gemini/oauth_creds.json",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "console": "https://gemini.google.com/",
+        # `api` non è "openai" apposta: Cloud Code parla un protocollo suo — `v1internal` con
+        # `:generateContent`, e /v1/chat/completions risponde 404 (misurato). Chi accetta solo
+        # endpoint in stile OpenAI deve poterlo escludere guardando questo campo.
+        #
+        # Ma il vero ostacolo non è il protocollo: al 15 agosto 2026 `loadCodeAssist` risponde
+        # che il piano dei privati NON è più ammesso —
+        #   "reasonCode": "UNSUPPORTED_CLIENT", "tierId": "free-tier",
+        #   "please migrate to the Antigravity suite of products"
+        # — e lascia solo `standard-tier`, a pagamento e con un progetto Google Cloud proprio.
+        # Un adattatore non servirebbe a niente: è il server a rifiutare, non il formato.
+        "note": "Riusa il login del CLI `gemini`, ma dal 2026 Google non ammette più i piani "
+                "individuali su Cloud Code (UNSUPPORTED_CLIENT): rimanda ad Antigravity, "
+                "oppure al piano a pagamento con progetto Google Cloud. Per l'uso a consumo "
+                "c'è il fornitore `gemini` con la chiave.",
     },
     # Z.AI ha DUE endpoint con piani e quote separati: stessa chiave non vale
     # su entrambi, quindi sono due provider e non un'opzione dello stesso.
     "zai": {
         "label": "Z.AI (piano API)", "auth": "api_key", "api": "openai",
         "local": False, "base_url": "https://api.z.ai/api/paas/v4",
+        "key_env": "ZAI_API_KEY",
+        "console": "https://z.ai/manage-apikey/apikey-list",
         "note": "Endpoint generale (GLM), OpenAI-compatibile.",
     },
     "zai_coding": {
         "label": "Z.AI (piano coding)", "auth": "api_key", "api": "openai",
         "local": False, "base_url": "https://api.z.ai/api/coding/paas/v4",
+        "key_env": "GLM_API_KEY",
+        "console": "https://z.ai/manage-apikey/apikey-list",
         "note": "Endpoint del piano coding (GLM-5.2 / GLM-5.1): quota separata "
                 "da quella del piano API.",
     },
     "nvidia": {
         "label": "NVIDIA NIM", "auth": "api_key", "api": "openai", "local": False,
         "base_url": "https://integrate.api.nvidia.com/v1",
+        "key_env": "NVIDIA_API_KEY",
+        "console": "https://build.nvidia.com/settings/api-keys",
         "note": "Modelli di build.nvidia.com, OpenAI-compatibile.",
+    },
+    "deepseek": {
+        "label": "DeepSeek", "auth": "api_key", "api": "openai", "local": False,
+        "base_url": "https://api.deepseek.com/v1",
+        "key_env": "DEEPSEEK_API_KEY",
+        "console": "https://platform.deepseek.com/api_keys",
+        "note": "OpenAI-compatibile. Espone anche il dialetto Anthropic su /anthropic.",
+    },
+    "kimi": {
+        "label": "Kimi (Moonshot AI)", "auth": "api_key", "api": "openai",
+        "local": False, "base_url": "https://api.moonshot.ai/v1",
+        "key_env": "KIMI_API_KEY",
+        "console": "https://platform.moonshot.ai/console/api-keys",
+        "note": "Endpoint internazionale. Quello cinese è api.moonshot.cn/v1, con "
+                "chiavi e conto separati.",
+    },
+    "nebius": {
+        "label": "Nebius Token Factory", "auth": "api_key", "api": "openai",
+        "local": False, "base_url": "https://api.tokenfactory.nebius.com/v1",
+        "key_env": "NEBIUS_API_KEY",
+        "console": "https://tokenfactory.nebius.com/",
+        "note": "Modelli aperti a consumo, OpenAI-compatibile.",
     },
     # Gira sulla macchina, ma NON è `local` per questa libreria: qui `local` significa "passa
     # dalla regola della VRAM", che si informa su `/api/v0/models` di LM Studio o sul manager
@@ -103,9 +221,10 @@ TYPES: dict[str, dict] = {
     # (`unsloth run --model …`), uno per volta: non c'è niente da risolvere, l'endpoint serve
     # quello che ha caricato.
     "unsloth": {
-        "label": "Unsloth (sul tuo computer, con chiave)", "auth": "api_key",
+        "label": "Unsloth", "auth": "api_key",
         "api": "openai", "local": False,
         "base_url": "http://localhost:8000/v1",
+        "key_env": "UNSLOTH_API_KEY",
         "note": "Server locale su llama.cpp. All'avvio stampa in console indirizzo e "
                 "chiave (`sk-unsloth-…`); la porta è 8000 o 8888 secondo come è stato "
                 "lanciato. Espone anche il dialetto Anthropic su /v1/messages.",
@@ -119,13 +238,16 @@ TYPES: dict[str, dict] = {
         "label": "OpenAI via Codex CLI (abbonamento)", "auth": "cli",
         "api": "cli", "local": True, "base_url": "",
         "command": "codex exec --skip-git-repo-check",
+        "cli_creds": "~/.codex/auth.json",
         "note": "Abbonamento ChatGPT tramite il CLI ufficiale. ~14s a "
                 "risposta: non adatto alla voce.",
     },
     "claude_cli": {
         "label": "Claude via Claude Code (abbonamento)", "auth": "cli",
         "api": "cli", "local": True, "base_url": "", "command": "claude -p",
-        "note": "Abbonamento Claude Pro/Max tramite il CLI ufficiale. ~6s.",
+        "cli_creds": "~/.claude/.credentials.json",
+        "note": "Abbonamento Claude Pro/Max tramite il CLI ufficiale. Il più rapido dei tre: "
+                "~4s a risposta (misurato).",
     },
     "antigravity": {
         "label": "Gemini via Antigravity CLI (abbonamento)", "auth": "cli",
@@ -133,8 +255,9 @@ TYPES: dict[str, dict] = {
         # Unico dei tre CLI a saper elencare i modelli: l'abbonamento non dà
         # solo Gemini, ma anche Claude e GPT-OSS.
         "models_command": "agy models",
-        "note": "Sostituisce il `gemini` CLI, chiuso agli account individuali "
-                "(IneligibleTierError). ~11s a risposta.",
+        "note": "L'unica via rimasta per un abbonamento Google: dal 2026 Cloud Code rifiuta i "
+                "piani individuali (UNSUPPORTED_CLIENT) e rimanda qui. ~10s a risposta. "
+                "Attenzione: `-p` vuole il testo come argomento, non da stdin.",
     },
 }
 
@@ -245,21 +368,56 @@ class Registry:
 
     # --- uso ---------------------------------------------------------------
 
+    def api_key_for(self, tipo: str) -> str:
+        """Chiave del primo provider configurato di quel TIPO; "" se non ce n'e' nessuno.
+
+        Serve ai programmi che scelgono il fornitore per conto loro — in una configurazione di
+        progetto, per esempio — ma non vogliono tenersi le chiavi in casa. La scelta di COSA
+        usare resta loro; QUI ci sono solo le credenziali, in un posto solo, fuori dalle
+        cartelle dei progetti e quindi fuori dai commit."""
+        tipo = (tipo or "").strip()
+        if not tipo:
+            return ""
+        for prov in self.load().get("providers", []):
+            if prov.get("type") == tipo and (prov.get("api_key") or "").strip():
+                return str(prov["api_key"]).strip()
+        return ""
+
+    def set_api_key_for(self, tipo: str, chiave: str) -> dict:
+        """Registra la chiave di quel TIPO, creando la voce se non c'era. Ritorna la voce.
+
+        Simmetrico di `api_key_for`. Una chiave vuota SVUOTA il campo senza rimuovere il
+        provider: chi la cancella per errore non deve perdere anche l'indirizzo e il modello
+        che aveva scelto."""
+        tipo = (tipo or "").strip()
+        if tipo not in TYPES:
+            raise ValueError(f"tipo sconosciuto: {tipo}")
+        esistente = next((p for p in self.load().get("providers", [])
+                          if p.get("type") == tipo), None)
+        if esistente is None:
+            return self.add({"type": tipo, "api_key": chiave})
+        return self.update(esistente["id"], {"api_key": chiave})
+
     def provider_for(self, consumer: str) -> dict | None:
         data = self.load()
         pid = (data.get("assignments") or {}).get(consumer) or ""
         return self._find(data, pid) if pid else None
 
-    def endpoint_for(self, consumer: str, embedding: bool = False
-                     ) -> tuple[str, str, str] | None:
+    def endpoint_for(self, consumer: str, embedding: bool = False,
+                     carica: bool = True) -> tuple[str, str, str] | None:
         """(base_url, api_key, modello) per un client OpenAI-compatibile.
 
         Con `embedding=True` torna `embed_model` invece di `model`: chi
         vettorizza non è chi conversa, e usare lo stesso campo manderebbe un
         LLM alla /embeddings.
 
-        Sui provider LOCALI il modello di chat lo decide `LocalEngines.resolve`,
-        con la regola della VRAM: qui torna già risolto."""
+        Sui provider LOCALI il modello di chat lo decide la regola della VRAM,
+        e qui torna gia' risolto. Con `carica=False` la regola si limita a
+        GUARDARE cosa c'e' in memoria (`warm`) invece di caricare il modello
+        preferito quando la memoria e' vuota (`resolve`): serve ai programmi
+        che non devono prendersi la VRAM di iniziativa propria — quella
+        decisione e' dell'utente, non dell'applicazione. A memoria vuota si
+        torna al modello configurato, e sara' il server a dire la sua."""
         prov = self.provider_for(consumer)
         if prov is None:
             return None
@@ -273,15 +431,70 @@ class Registry:
             return base, (prov.get("api_key") or "local").strip(), modello
         if spec.get("local") and spec.get("api") != "cli":
             eng = self._engines_for(prov)
-            r = eng.resolve("vllm" if prov.get("type") == "vllm" else "lmstudio")
-            return r.base_url, (prov.get("api_key") or "local").strip(), r.model
+            preferito = "vllm" if prov.get("type") == "vllm" else "lmstudio"
+            chiave = (prov.get("api_key") or "local").strip()
+            if carica:
+                r = eng.resolve(preferito)
+                return r.base_url, chiave, r.model
+            caldo = eng.warm(preferito)
+            if caldo is not None and caldo.model:
+                return caldo.base_url, chiave, caldo.model
+            base = ((prov.get("base_url") or "").strip()
+                    or spec.get("base_url") or "").strip()
+            return base, chiave, (prov.get("model") or "").strip()
         # Per chattare serve l'endpoint OpenAI-compatibile, che su Gemini e
         # Anthropic non è quello che elenca i modelli.
         base = ((prov.get("base_url") or "").strip()
                 or spec.get("chat_base_url") or spec.get("base_url") or "").strip()
-        key = ((prov.get("oauth") or {}).get("access_token")
+        key = (self._token_abbonamento(prov)
+               or (prov.get("oauth") or {}).get("access_token")
                or prov.get("api_key") or "").strip()
         return base, key, (prov.get("model") or "").strip()
+
+    @staticmethod
+    def _token_abbonamento(prov: dict) -> str:
+        """Token dell'abbonamento, preso dallo strumento ufficiale e rinnovato se serve.
+
+        Senza questo, un provider ad abbonamento uscirebbe da `endpoint_for` con la chiave
+        vuota e la prima richiesta prenderebbe un 401 — con l'utente convinto di averlo
+        configurato, perché nel registro la voce c'è.
+
+        Il rinnovo silenzioso sì, il login interattivo no: `endpoint_for` viene chiamata anche
+        da programmi che macinano lavori senza nessuno davanti allo schermo, e fermarli in
+        attesa di una conferma nel browser li pianterebbe fino al timeout.
+        """
+        tipo = (prov.get("type") or "").strip()
+        try:
+            from .oauth import ABBONAMENTI, access_token
+
+            if tipo not in ABBONAMENTI:
+                return ""
+            return access_token(tipo, consenti_login=False)
+        except Exception as e:  # noqa: BLE001 — non collegato è un caso normale, non un guasto
+            log.debug("%s: nessun token d'abbonamento disponibile (%s)", tipo, e)
+            return ""
+
+    def headers_for(self, consumer: str) -> dict[str, str]:
+        """Intestazioni HTTP complete per parlare col provider assegnato.
+
+        Serve perché `endpoint_for` restituisce una chiave sola, e a certi servizi non basta:
+        il backend di Codex pretende anche l'id dell'account, e senza quello risponde picche
+        pur avendo un token valido.
+        """
+        prov = self.provider_for(consumer)
+        if prov is None:
+            return {}
+        tipo = (prov.get("type") or "").strip()
+        try:
+            from .oauth import ABBONAMENTI, intestazioni
+
+            if tipo in ABBONAMENTI:
+                return intestazioni(tipo, consenti_login=False)
+        except Exception as e:  # noqa: BLE001
+            log.debug("%s: intestazioni d'abbonamento non disponibili (%s)", tipo, e)
+        risolto = self.endpoint_for(consumer, carica=False)
+        chiave = risolto[1] if risolto else ""
+        return {"Authorization": f"Bearer {chiave}"} if chiave else {}
 
     # --- modifica ----------------------------------------------------------
 
@@ -427,33 +640,26 @@ def _gemini_models(base_url: str, api_key: str, token: str = "") -> list[dict]:
 
 
 def _cli_models(prov: dict, spec: dict) -> list[dict]:
-    """Provider "CLI ufficiale": nessun endpoint da interrogare.
+    """Provider "CLI ufficiale": nessun endpoint da interrogare, si chiede al programma.
 
-    Se il CLI sa elencare i suoi modelli (`models_command`) si usa quello:
-    Antigravity, per esempio, dà accesso non solo a Gemini ma anche a Claude e
-    GPT-OSS, e sceglierli a mano sarebbe indovinare."""
-    import subprocess
-    cmd = (prov.get("base_url") or spec.get("command") or "").split()
-    exe = cmd[0] if cmd else ""
-    if not exe or shutil.which(exe) is None:
-        raise RuntimeError(f"comando '{exe or '?'}' non trovato nel PATH")
-    elenco = (spec.get("models_command") or "").split()
-    if elenco:
-        try:
-            p = subprocess.run(elenco, capture_output=True, text=True, timeout=60,
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            out = []
-            for riga in (p.stdout or "").splitlines():
-                # "id<TAB>Etichetta"; le righe di servizio non hanno il tab.
-                if "	" not in riga:
-                    continue
-                mid, _, label = riga.partition("	")
-                if mid.strip():
-                    out.append({"id": mid.strip(), "label": label.strip() or mid.strip()})
-            if out:
-                return out
-        except (OSError, subprocess.TimeoutExpired) as e:
-            log.debug("`%s` non ha risposto: %s", " ".join(elenco), e)
+    L'interrogazione vera sta in `agents`, che è dove i CLI vengono eseguiti: tenerne due
+    copie significherebbe correggere ogni difetto due volte — ed è il difetto che questa
+    libreria esiste per togliere agli altri progetti."""
+    from .agents import AGENTI, disponibile
+    from .agents import modelli as _modelli_agente
+
+    tipo = (prov.get("type") or "").strip()
+    if tipo in AGENTI:
+        if not disponibile(tipo):
+            raise RuntimeError(f"comando '{AGENTI[tipo].comando[0]}' non trovato nel PATH")
+        trovati = _modelli_agente(tipo)
+        if trovati:
+            return trovati
+    else:
+        exe = (prov.get("base_url") or spec.get("command") or "").split()
+        if not exe or shutil.which(exe[0]) is None:
+            raise RuntimeError(f"comando '{exe[0] if exe else '?'}' non trovato nel PATH")
+    # Chi non sa elencare i suoi modelli usa quello che ha configurato al proprio interno.
     scelto = (prov.get("model") or "").strip()
     return [{"id": scelto or "default",
              "label": scelto or "(quello configurato nel CLI)"}]

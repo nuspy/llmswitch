@@ -57,6 +57,21 @@ class LmStudioConfig:
     app_path: str = ""
     start_timeout_s: float = 90.0
     load_timeout_s: float = 300.0
+    # --- come caricare, quando si carica -------------------------------------------------
+    # Senza questi, `lms load` usa i valori di serie di LM Studio, che non sono quelli che
+    # servono a un programma solo: `parallel` di serie è 4, e vuol dire che il server accetta
+    # quattro richieste insieme. Con due processi vivi — o con un test lanciato di fianco —
+    # si servono a vicenda e ciascuno va a metà velocità.
+    #: Finestra di contesto. 0 = quella predefinita del modello.
+    context_length: int = 0
+    #: Richieste servite insieme. 1 = una per volta, le altre in fila.
+    parallel: int = 1
+    #: Quota da mettere sulla GPU: "max", "off", o una frazione. Vuoto = decide LM Studio.
+    gpu: str = "max"
+    #: Secondi di inattività dopo i quali scaricare. 0 = mai, e resta finché non lo scarichi tu.
+    #: Un TTL scaduto, col caricamento a richiesta disattivato, lascia l'applicazione senza
+    #: modello e senza nessuno che lo rimetta: è già successo.
+    ttl_s: int = 0
 
 
 @dataclass
@@ -157,6 +172,14 @@ class LocalEngines:
 
     def _states(self) -> dict[str, str] | None:
         """`id -> state` da `/api/v0/models`. None se non interrogabile."""
+        meta = self._meta()
+        return None if meta is None else {mid: st for mid, (st, _) in meta.items()}
+
+    def _meta(self) -> dict[str, tuple[str, str]] | None:
+        """`id -> (state, type)` da `/api/v0/models`. None se non interrogabile.
+
+        Il TIPO serve quanto lo stato: `embeddings` sta in memoria come gli altri ma non
+        genera testo, e mandargli una chat dà una risposta vuota o un errore."""
         if not self.lmstudio_up():
             return None
         import requests
@@ -168,17 +191,23 @@ class LocalEngines:
         entries = data.get("data")
         if not isinstance(entries, list):
             return None
-        return {str(m.get("id")).strip(): str(m.get("state") or "").lower()
+        return {str(m.get("id")).strip(): (str(m.get("state") or "").lower(),
+                                           str(m.get("type") or "").lower())
                 for m in entries if isinstance(m, dict) and m.get("id")}
 
-    def loaded(self) -> list[str] | None:
+    def loaded(self, kind: str = "") -> list[str] | None:
         """Modelli in memoria. **None** = non si è potuto sapere, ben diverso
-        da `[]` = nessuno (che autorizzerebbe a caricarne uno)."""
+        da `[]` = nessuno (che autorizzerebbe a caricarne uno).
+
+        `kind="text"` esclude i modelli di embedding: chi cerca con chi CONVERSARE non deve
+        ricevere un vettorizzatore, che in memoria ci sta quasi sempre — accanto all'altro,
+        non al posto suo."""
         if not self.lmstudio_up():
             return None                      # e NON si sveglia la CLI
-        stati = self._states()
-        if stati is not None:
-            return [mid for mid, st in stati.items() if st == "loaded"]
+        meta = self._meta()
+        if meta is not None:
+            return [mid for mid, (st, tipo) in meta.items()
+                    if st == "loaded" and not (kind == "text" and tipo == "embeddings")]
         cli = self.lms_cli()
         if not cli:
             return None
@@ -352,6 +381,19 @@ class LocalEngines:
                 return False, str(e)
         return True, "scaricato: " + ", ".join(bersagli)
 
+    def _argomenti_di_carico(self, model_id: str) -> list[str]:
+        """`load <modello> --yes` con i parametri della configurazione, non quelli di serie."""
+        fuori = ["load", model_id, "--yes"]
+        if self.lm.gpu:
+            fuori += ["--gpu", self.lm.gpu]
+        if self.lm.context_length > 0:
+            fuori += ["-c", str(self.lm.context_length)]
+        if self.lm.parallel > 0:
+            fuori += ["--parallel", str(self.lm.parallel)]
+        if self.lm.ttl_s > 0:
+            fuori += ["--ttl", str(self.lm.ttl_s)]
+        return fuori
+
     def swap(self, model: str) -> tuple[bool, str]:
         """Scarica il caldo e carica `model` al suo posto (swap CONFERMATO)."""
         ok, msg = self.unload()
@@ -436,7 +478,7 @@ class LocalEngines:
 
         Sonda di sola lettura: non avvia LM Studio e non chiede istanze vLLM."""
         def _lm() -> Resolution | None:
-            caldi = self.loaded()
+            caldi = self.loaded("text")
             if not caldi:
                 return None
             want = (self.lm.model or "").strip()
@@ -483,7 +525,7 @@ class LocalEngines:
         want = (self.lm.model or "").strip()
         if not self.lmstudio_up() and not self.start_lmstudio():
             return Resolution("lmstudio", self.lm.base_url, want, "server non raggiungibile")
-        caldi = self.loaded()
+        caldi = self.loaded("text")
         if caldi is None:
             log.warning("stato dei modelli ignoto: non chiedo caricamenti")
             return Resolution("lmstudio", self.lm.base_url, want, "stato ignoto")
@@ -498,7 +540,7 @@ class LocalEngines:
             deadline = time.monotonic() + float(self.lm.load_timeout_s)
             while time.monotonic() < deadline:
                 time.sleep(2.0)
-                pronti = self.loaded() or []
+                pronti = self.loaded("text") or []
                 if pronti:
                     return Resolution("lmstudio", self.lm.base_url, pronti[0],
                                       "caricamento concluso")
@@ -516,16 +558,17 @@ class LocalEngines:
         if not ok:
             log.error("non carico '%s': %s", esatto, perche)
             return Resolution("lmstudio", self.lm.base_url, "", f"VRAM insufficiente: {perche}")
-        log.info("carico '%s'", esatto)
+        argomenti = self._argomenti_di_carico(esatto)
+        log.info("carico '%s' (%s)", esatto, " ".join(argomenti[2:]) or "valori predefiniti")
         try:
-            subprocess.run([cli, "load", esatto, "--yes"], capture_output=True, text=True,
+            subprocess.run([cli, *argomenti], capture_output=True, text=True,
                            timeout=float(self.lm.load_timeout_s), creationflags=_NO_WINDOW)
         except (OSError, subprocess.TimeoutExpired) as e:
             log.error("`lms load` non completato: %s", e)
         # Si restituisce l'id REALMENTE in memoria: se il caricamento è fallito
         # o è arrivata un'altra variante, mandare quello richiesto ne farebbe
         # partire un secondo.
-        dopo = self.loaded() or []
+        dopo = self.loaded("text") or []
         if dopo:
             return Resolution("lmstudio", self.lm.base_url,
                               next((m for m in dopo if same_model(m, esatto)), dopo[0]),

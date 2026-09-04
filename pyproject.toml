@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llmswitch"
 version = "0.1.0"
-description = "Provider LLM locali e remoti con gestione seria della VRAM: un modello gia' in memoria si usa e basta."
+description = "Provider LLM locali, a consumo e ad abbonamento: un modello gia' in memoria si usa e basta, e un piano gia' pagato si riusa senza rifare il login."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -15,6 +15,11 @@ dependencies = ["requests>=2.28"]
 [project.optional-dependencies]
 # Blueprint Flask pronto all'uso: si installa solo se serve.
 flask = ["flask>=3.0"]
+# Per eseguire la suite. I test non lanciano mai i CLI veri ne' toccano credenziali.
+test = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["llmswitch*"]
