@@ -8,6 +8,7 @@ Antigravity stampa l'aiuto invece di rispondere, senza che nessuno se ne accorga
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,16 @@ import pytest
 
 from llmswitch import agents
 from llmswitch.agents import AgentError
+
+
+def _stream_json_ok(response: str = "da stream") -> str:
+    """Uno stream NDJSON come quello vero di Antigravity: init, un turno, il `result`."""
+    righe = [
+        {"event": "init", "conversation_id": "x"},
+        {"event": "step_update", "step_update": {"text_delta": response}},
+        {"event": "result", "result": {"status": "SUCCESS", "response": response}},
+    ]
+    return "\n".join(json.dumps(r) for r in righe) + "\n"
 
 
 @pytest.fixture()
@@ -25,6 +36,9 @@ def finto(monkeypatch):
     def esegui(argomenti, input=None, capture_output=None, text=None, encoding=None,  # noqa: A002
                errors=None, timeout=None, cwd=None, creationflags=None):
         visto.update(argomenti=list(argomenti), input=input, cwd=cwd, timeout=timeout)
+        # Antigravity risponde con uno stream NDJSON; la risposta sta nell'evento `result`.
+        if "stream-json" in argomenti:
+            return subprocess.CompletedProcess(argomenti, 0, stdout=_stream_json_ok(), stderr="")
         # Chi risponde su file lo trova nell'argomento dopo l'opzione di uscita.
         if "-o" in argomenti:
             Path(argomenti[argomenti.index("-o") + 1]).write_text("dal file", encoding="utf-8")
@@ -58,15 +72,32 @@ def test_claude_receives_the_prompt_on_standard_input(finto) -> None:
     assert finto["input"] == "traduci questo"
 
 
-def test_antigravity_receives_the_prompt_as_an_argument(finto) -> None:
-    """`-p` è `--print` e vuole il testo lì: da stdin stamperebbe l'aiuto e se ne andrebbe.
+def test_antigravity_receives_the_prompt_on_stdin_as_stream_json(finto) -> None:
+    """Il prompt viaggia come NDJSON su stdin, non come argomento.
 
-    È un errore silenzioso — codice di uscita zero, output plausibile — quindi vale un test:
-    era davvero scritto così nel registro, e nessuno se n'era accorto.
+    Passato come argomento di `-p`, un testo lungo (una trascrizione d'intervista) sforava la
+    command line di Windows e il lancio moriva con [WinError 206]. Lo stdin non ha quel limite.
     """
-    agents.genera("antigravity", "traduci questo")
-    assert finto["argomenti"] == ["agy", "-p", "traduci questo"]
-    assert finto["input"] is None
+    assert agents.genera("antigravity", "traduci questo") == "da stream"
+    assert finto["argomenti"] == [
+        "agy", "--input-format", "stream-json", "--output-format", "stream-json",
+    ]
+    assert "traduci questo" not in finto["argomenti"]  # niente prompt fra gli argomenti
+    messaggio = json.loads(finto["input"])
+    assert messaggio["event"] == "user"
+    assert messaggio["message"]["content"][0]["text"] == "traduci questo"
+
+
+def test_antigravity_reports_a_failed_turn_from_the_result_event(finto, monkeypatch) -> None:
+    """Un turno fallito porta il suo motivo nel `result`, non un codice di uscita da leggere."""
+    fallito = json.dumps({"event": "result",
+                          "result": {"status": "ERROR", "error": "sessione scaduta"}}) + "\n"
+    monkeypatch.setattr(
+        agents.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=fallito, stderr=""),
+    )
+    with pytest.raises(AgentError, match="sessione scaduta"):
+        agents.genera("antigravity", "ciao")
 
 
 def test_codex_answer_is_read_from_the_file_not_from_the_noise(finto) -> None:
@@ -78,7 +109,23 @@ def test_codex_answer_is_read_from_the_file_not_from_the_noise(finto) -> None:
 
 def test_the_chosen_model_is_passed_along(finto) -> None:
     agents.genera("antigravity", "ciao", model="gemini-3.7-flash-high")
-    assert finto["argomenti"][-3:] == ["--model", "gemini-3.7-flash-high", "ciao"]
+    # Il modello è un'opzione di sessione; il prompt non è più fra gli argomenti ma su stdin.
+    assert finto["argomenti"][-2:] == ["--model", "gemini-3.7-flash-high"]
+
+
+def test_the_placeholder_model_is_not_sent_as_a_real_one(finto) -> None:
+    """`default` è il segnaposto di un provider senza modello scelto: `agy` lo rifiuterebbe.
+
+    Va trattato come «nessun modello» — niente `--model`, e l'agente usa il default del suo
+    account. È il difetto che bloccava un'intervista: «model default is not recognized».
+    """
+    agents.genera("antigravity", "ciao", model=agents.MODELLO_SEGNAPOSTO)
+    assert "--model" not in finto["argomenti"]
+
+
+def test_a_blank_model_leaves_the_option_off(finto) -> None:
+    agents.genera("antigravity", "ciao", model="   ")
+    assert "--model" not in finto["argomenti"]
 
 
 def test_by_default_the_agent_runs_in_an_empty_folder(finto, tmp_path, monkeypatch) -> None:

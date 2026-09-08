@@ -22,6 +22,7 @@ il codice di chi li chiama è un effetto collaterale, non una funzione.
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
@@ -35,6 +36,10 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # niente console su Win
 
 #: Attesa massima per una risposta. Sono agenti: dieci secondi sono la norma, non l'eccezione.
 TIMEOUT_DEFAULT_S = 300.0
+
+#: Id che `modelli()` restituisce quando un provider non ha un modello scelto. Non è un modello
+#: reale: non va mai passato come `--model`, o l'agente lo rifiuta.
+MODELLO_SEGNAPOSTO = "default"
 
 
 class AgentError(RuntimeError):
@@ -85,9 +90,13 @@ AGENTI: dict[str, Agente] = {
     "antigravity": Agente(
         id="antigravity",
         label="Gemini via Antigravity CLI (abbonamento)",
-        # `-p` è `--print` e vuole il testo come ARGOMENTO: senza, stampa l'aiuto e se ne va.
-        comando=("agy", "-p"),
-        prompt_come="argomento",
+        # `-p` vuole il prompt come ARGOMENTO, e su Windows la command line di CreateProcess ha un
+        # tetto (~32 KB): una trascrizione d'intervista lo supera e il lancio muore con
+        # [WinError 206] «The filename or extension is too long». La modalità stream-json legge
+        # invece un messaggio NDJSON da stdin, che non ha limiti di lunghezza, e restituisce la
+        # risposta nell'evento `result`.
+        comando=("agy", "--input-format", "stream-json", "--output-format", "stream-json"),
+        prompt_come="stream-json",
         opzione_modello="--model",
         elenco_modelli=("agy", "models"),
         note="L'unica via rimasta per usare un abbonamento Google: dal 2026 Cloud Code non "
@@ -155,13 +164,25 @@ def genera(nome: str, prompt: str, *, model: str = "",
         uscita = Path(usaegetta) / "risposta.txt"
 
         argomenti = list(a.comando)
-        if model and a.opzione_modello:
-            argomenti += [a.opzione_modello, model]
+        # `default` è il segnaposto che `modelli()` restituisce per un provider a cui nessun modello
+        # è stato scelto: non è un modello reale, e passarlo come `--model` fa fallire l'agente
+        # («model default is not recognized»). Senza modello — o con quel segnaposto — non si passa
+        # l'opzione affatto e l'agente usa il default configurato nel proprio account.
+        modello = (model or "").strip()
+        if modello and modello != MODELLO_SEGNAPOSTO and a.opzione_modello:
+            argomenti += [a.opzione_modello, modello]
         if a.risposta_da == "file":
             argomenti += [a.opzione_uscita, str(uscita)]
         da_scrivere = None
         if a.prompt_come == "argomento":
             argomenti.append(prompt)
+        elif a.prompt_come == "stream-json":
+            # Un solo messaggio NDJSON su stdin: nessun limite di lunghezza, a differenza di un
+            # argomento di riga di comando.
+            da_scrivere = json.dumps(
+                {"event": "user",
+                 "message": {"role": "user", "content": [{"type": "text", "text": prompt}]}}
+            ) + "\n"
         else:
             da_scrivere = prompt
 
@@ -179,7 +200,11 @@ def genera(nome: str, prompt: str, *, model: str = "",
         except OSError as e:
             raise AgentError(f"{a.label}: non si è potuto eseguire ({e})") from e
 
-        if a.risposta_da == "file":
+        if a.prompt_come == "stream-json":
+            testo, errore = _risposta_stream_json(esito.stdout or "")
+            if errore:
+                raise AgentError(f"{a.label}: {errore}")
+        elif a.risposta_da == "file":
             testo = uscita.read_text(encoding="utf-8") if uscita.is_file() else ""
         else:
             testo = esito.stdout or ""
@@ -190,3 +215,29 @@ def genera(nome: str, prompt: str, *, model: str = "",
         motivo = (esito.stderr or "").strip()[:300] or f"uscita {esito.returncode}"
         raise AgentError(f"{a.label}: nessuna risposta ({motivo})")
     return testo
+
+
+def _risposta_stream_json(stdout: str) -> tuple[str, str]:
+    """La risposta pulita dallo stream NDJSON di Antigravity — restituisce ``(testo, errore)``.
+
+    Lo stream è una riga JSON per evento: `init`, poi gli `step_update` con i pezzi di risposta,
+    infine un `result` che è l'ultima parola. Si legge quello: porta la risposta intera in
+    ``response`` e, quando un turno fallisce, il motivo in ``error`` — invece di un codice di
+    uscita da interpretare. Delle due stringhe tornate una sola è piena.
+    """
+    risultato: dict | None = None
+    for riga in stdout.splitlines():
+        riga = riga.strip()
+        if not riga:
+            continue
+        try:
+            evento = json.loads(riga)
+        except ValueError:
+            continue  # righe non-JSON di servizio: non sono la risposta
+        if isinstance(evento, dict) and evento.get("event") == "result":
+            risultato = evento.get("result") or {}
+    if risultato is None:
+        return "", "nessun evento 'result' nello stream"
+    if str(risultato.get("status", "")).upper() != "SUCCESS":
+        return "", str(risultato.get("error") or f"stato {risultato.get('status')}")
+    return str(risultato.get("response") or ""), ""

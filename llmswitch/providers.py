@@ -251,13 +251,15 @@ TYPES: dict[str, dict] = {
     },
     "antigravity": {
         "label": "Gemini via Antigravity CLI (abbonamento)", "auth": "cli",
-        "api": "cli", "local": True, "base_url": "", "command": "agy -p",
+        "api": "cli", "local": True, "base_url": "",
+        "command": "agy --input-format stream-json --output-format stream-json",
         # Unico dei tre CLI a saper elencare i modelli: l'abbonamento non dà
         # solo Gemini, ma anche Claude e GPT-OSS.
         "models_command": "agy models",
         "note": "L'unica via rimasta per un abbonamento Google: dal 2026 Cloud Code rifiuta i "
                 "piani individuali (UNSUPPORTED_CLIENT) e rimanda qui. ~10s a risposta. "
-                "Attenzione: `-p` vuole il testo come argomento, non da stdin.",
+                "Il prompt viaggia come NDJSON su stdin (`stream-json`): passarlo come argomento "
+                "di `-p` sfora la command line di Windows su un testo lungo ([WinError 206]).",
     },
 }
 
@@ -645,7 +647,7 @@ def _cli_models(prov: dict, spec: dict) -> list[dict]:
     L'interrogazione vera sta in `agents`, che è dove i CLI vengono eseguiti: tenerne due
     copie significherebbe correggere ogni difetto due volte — ed è il difetto che questa
     libreria esiste per togliere agli altri progetti."""
-    from .agents import AGENTI, disponibile
+    from .agents import AGENTI, MODELLO_SEGNAPOSTO, disponibile
     from .agents import modelli as _modelli_agente
 
     tipo = (prov.get("type") or "").strip()
@@ -661,5 +663,5 @@ def _cli_models(prov: dict, spec: dict) -> list[dict]:
             raise RuntimeError(f"comando '{exe[0] if exe else '?'}' non trovato nel PATH")
     # Chi non sa elencare i suoi modelli usa quello che ha configurato al proprio interno.
     scelto = (prov.get("model") or "").strip()
-    return [{"id": scelto or "default",
+    return [{"id": scelto or MODELLO_SEGNAPOSTO,
              "label": scelto or "(quello configurato nel CLI)"}]
