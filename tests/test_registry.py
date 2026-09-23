@@ -206,3 +206,108 @@ def test_the_endpoint_never_stops_to_ask_for_a_login(tmp_path: Path, monkeypatch
     reg.assign("chat", reg.add({"type": "grok_oauth"})["id"])
     reg.endpoint_for("chat")
     assert visto["consenti_login"] is False
+
+
+# --- attivazione on-demand via SSH (es. Bonsai) --------------------------------------
+# Indirizzi e comandi finti: quelli veri stanno nel registro di chi ospita il server.
+
+ATTIVAZIONE = {"ssh_host": "utente@server.invalid", "start": "accendi.ps1",
+               "stop": "spegni.ps1", "health_url": "http://server.invalid:7707/health"}
+
+
+def _bonsai(registro: Registry, **extra) -> dict:
+    return registro.add({"type": "bonsai", "model": "m",
+                         "base_url": "http://server.invalid:7707/v1",
+                         "activation": dict(ATTIVAZIONE), **extra})
+
+
+def test_bonsai_gives_a_usable_key_without_auth(registro: Registry) -> None:
+    """Server senza auth: la chiave torna 'local', mai vuota, o il client OpenAI rifiuta."""
+    voce = _bonsai(registro, model="bonsai-2-27b-abliterated")
+    registro.assign("chat", voce["id"])
+    base, chiave, modello = registro.endpoint_for("chat", carica=False)
+    assert base == "http://server.invalid:7707/v1"
+    assert (chiave, modello) == ("local", "bonsai-2-27b-abliterated")
+
+
+def test_the_bonsai_type_carries_no_machine_specific_values() -> None:
+    """Indirizzo e comandi sono di chi ospita il server: nel tipo non devono esserci."""
+    assert TYPES["bonsai"]["base_url"] == ""
+    assert "activation" not in TYPES["bonsai"]
+
+
+def test_looking_without_permission_does_not_power_on(registro: Registry, monkeypatch) -> None:
+    """Con carica=False non si accende niente: guardare non deve prendere VRAM."""
+    chiamate = []
+
+    def finto(act):
+        chiamate.append(act)
+        return True, "attivo"
+
+    monkeypatch.setattr("llmswitch.providers.activate_server", finto)
+    registro.assign("chat", _bonsai(registro)["id"])
+    registro.endpoint_for("chat", carica=False)
+    assert chiamate == []
+
+
+def test_endpoint_with_permission_powers_the_server_on(registro: Registry, monkeypatch) -> None:
+    chiamate = []
+
+    def finto(act):
+        chiamate.append(act)
+        return True, "attivo"
+
+    monkeypatch.setattr("llmswitch.providers.activate_server", finto)
+    registro.assign("chat", _bonsai(registro)["id"])
+    registro.endpoint_for("chat", carica=True)
+    assert len(chiamate) == 1
+    assert chiamate[0]["ssh_host"] == ATTIVAZIONE["ssh_host"]
+
+
+def test_activate_and_deactivate_pass_the_right_commands(registro: Registry, monkeypatch) -> None:
+    visti: dict = {}
+
+    def finto_start(act):
+        visti["start"] = act
+        return True, "attivo"
+
+    def finto_stop(act):
+        visti["stop"] = act
+        return True, "spento"
+
+    monkeypatch.setattr("llmswitch.providers.activate_server", finto_start)
+    monkeypatch.setattr("llmswitch.providers.stop_server", finto_stop)
+    voce = _bonsai(registro)
+    assert registro.activate(voce["id"]) == (True, "attivo")
+    assert registro.deactivate(voce["id"]) == (True, "spento")
+    assert visti["start"]["start"] == "accendi.ps1"
+    assert visti["stop"]["stop"] == "spegni.ps1"
+
+
+def test_a_provider_without_activation_says_so(registro: Registry) -> None:
+    voce = registro.add({"type": "deepseek", "api_key": "sk-x"})
+    with pytest.raises(ValueError):
+        registro.activate(voce["id"])
+
+
+def test_a_bonsai_without_activation_says_so(registro: Registry) -> None:
+    """Senza la voce `activation` non c'è niente da accendere: lo si dice, non si indovina."""
+    voce = registro.add({"type": "bonsai", "model": "m"})
+    with pytest.raises(ValueError):
+        registro.activate(voce["id"])
+
+
+def test_per_provider_activation_beats_the_type_default(registro: Registry, monkeypatch) -> None:
+    visti: dict = {}
+
+    def finto(act):
+        visti.update(act)
+        return True, "attivo"
+
+    monkeypatch.setattr("llmswitch.providers.activate_server", finto)
+    monkeypatch.setitem(TYPES["bonsai"], "activation", {"ssh_host": "tipo@host", "start": "x"})
+    voce = registro.add({"type": "bonsai", "model": "m",
+                         "activation": {"ssh_host": "altro@host", "start": "s.ps1",
+                                        "stop": "t.ps1", "health_url": "http://h/health"}})
+    registro.activate(voce["id"])
+    assert visti["ssh_host"] == "altro@host"

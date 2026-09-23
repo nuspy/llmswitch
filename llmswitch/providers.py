@@ -35,13 +35,19 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
 
+import requests
+
 from .local import LmStudioConfig, LocalEngines, VllmConfig
 
 log = logging.getLogger("llmswitch.providers")
+
+#: niente finestra console per i comandi ssh su Windows
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 TYPES: dict[str, dict] = {
     "lmstudio": {
@@ -63,6 +69,29 @@ TYPES: dict[str, dict] = {
         # come LM Studio né un manager come vLLM. Non c'è niente da risolvere.
         "note": "Server di llama.cpp, OpenAI-compatibile. Porta 8080 salvo `--port`. "
                 "Serve il modello passato all'avvio: non se ne cambia da qui.",
+    },
+    # Server llama.cpp (fork PrismML) dedicato a Bonsai 2, di solito su un'altra macchina.
+    # `local` è False come per llamacpp: serve un solo modello dato all'avvio e non ha un'API
+    # di stato. La novità è `activation`: il server occupa ~15 GB di VRAM, quindi si accende
+    # ON-DEMAND via SSH e si spegne quando non serve. Con `endpoint_for(carica=True)`
+    # llmswitch lo accende da sé e attende /health; con `carica=False` lo lascia com'è — non
+    # prende VRAM di iniziativa propria.
+    #
+    # Indirizzo, host SSH e comandi dipendono dalla macchina di chi lo ospita: non stanno qui
+    # ma nella voce del registro, che è fuori dal progetto. Una voce tipica:
+    #   {"type": "bonsai", "base_url": "http://<host>:7707/v1",
+    #    "model": "bonsai-2-27b-abliterated",
+    #    "activation": {"ssh_host": "<utente>@<host>", "start": "<comando>",
+    #                   "stop": "<comando>", "health_url": "http://<host>:7707/health",
+    #                   "wait_seconds": 120, "ssh_timeout": 60}}
+    "bonsai": {
+        "label": "Bonsai 2 27B (self-hosted)", "auth": "none", "api": "openai",
+        "local": False,
+        "base_url": "",
+        "note": "Ternary-Bonsai-2-27B abliterated (PQ2_0), fork PrismML. Model id "
+                "`bonsai-2-27b-abliterated`. Indirizzo e attivazione SSH (~15 GB VRAM) vanno "
+                "nella voce del registro. Reasoning model: tieni max_tokens alto. UNCENSORED: "
+                "nessun filtro contenuti.",
     },
     "openai": {
         "label": "OpenAI", "auth": "api_key", "api": "openai", "local": False,
@@ -274,6 +303,67 @@ def default_registry_path(app_name: str = "llmswitch") -> Path:
     return Path(base) / app_name / "llm_providers.json"
 
 
+# --- attivazione SSH di un server on-demand ---------------------------------------
+# Alcuni motori (es. Bonsai) girano su un'altra macchina e occupano molta VRAM: vanno
+# accesi solo quando servono. I parametri stanno nella voce del provider
+# (`prov["activation"]`); un tipo può dare un default in `TYPES[tipo]["activation"]`, ma
+# solo se non contiene indirizzi o percorsi di una macchina precisa.
+
+def activation_of(prov: dict, spec: dict) -> dict | None:
+    """Parametri di attivazione SSH: quelli del provider hanno precedenza sul tipo."""
+    act = prov.get("activation") or spec.get("activation")
+    return act if isinstance(act, dict) and act.get("start") else None
+
+
+def server_up(health_url: str, timeout: float = 3.0) -> bool:
+    """True se /health risponde 200."""
+    if not health_url:
+        return False
+    try:
+        return requests.get(health_url, timeout=timeout).status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def _ssh(host: str, command: str, timeout: float) -> tuple[bool, str]:
+    if not host or not command:
+        return False, "attivazione: mancano ssh_host o il comando"
+    try:
+        p = subprocess.run(["ssh", host, command], capture_output=True, text=True,
+                           timeout=timeout, creationflags=_NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"ssh fallito: {e}"
+    if p.returncode != 0:
+        return False, f"ssh uscito con {p.returncode}: {(p.stderr or p.stdout or '').strip()[:200]}"
+    return True, (p.stdout or "").strip()
+
+
+def activate_server(act: dict) -> tuple[bool, str]:
+    """Accende il server via SSH (se non già su) e attende /health. Idempotente."""
+    health = act.get("health_url") or ""
+    if server_up(health):
+        return True, "già attivo"
+    ok, msg = _ssh(act.get("ssh_host") or "", act.get("start") or "",
+                   float(act.get("ssh_timeout", 60)))
+    if not ok:
+        return False, f"avvio: {msg}"
+    if not health:
+        return True, "avviato (nessun health_url da verificare)"
+    deadline = time.monotonic() + float(act.get("wait_seconds", 120))
+    while time.monotonic() < deadline:
+        if server_up(health):
+            return True, "attivo"
+        time.sleep(2.0)
+    return False, "avviato ma /health non risponde entro il timeout"
+
+
+def stop_server(act: dict) -> tuple[bool, str]:
+    """Spegne il server via SSH per liberare la VRAM."""
+    ok, msg = _ssh(act.get("ssh_host") or "", act.get("stop") or "",
+                   float(act.get("ssh_timeout", 60)))
+    return (True, "spento") if ok else (False, f"spegnimento: {msg}")
+
+
 class Registry:
     """Provider configurati e loro assegnazioni, su file JSON."""
 
@@ -444,6 +534,14 @@ class Registry:
             base = ((prov.get("base_url") or "").strip()
                     or spec.get("base_url") or "").strip()
             return base, chiave, (prov.get("model") or "").strip()
+        # Server on-demand (es. Bonsai): se il consumer è disposto a prendere VRAM
+        # (`carica=True`), accendiamo il server via SSH e attendiamo /health. Con
+        # `carica=False` non si tocca: quella decisione è dell'utente, non dell'app.
+        act = activation_of(prov, spec) if carica else None
+        if act:
+            ok, perche = activate_server(act)
+            if not ok:
+                log.warning("attivazione '%s' non riuscita: %s", prov.get("id"), perche)
         # Per chattare serve l'endpoint OpenAI-compatibile, che su Gemini e
         # Anthropic non è quello che elenca i modelli.
         base = ((prov.get("base_url") or "").strip()
@@ -451,6 +549,10 @@ class Registry:
         key = (self._token_abbonamento(prov)
                or (prov.get("oauth") or {}).get("access_token")
                or prov.get("api_key") or "").strip()
+        # Server senza autenticazione (Bonsai, llama.cpp): il client OpenAI vuole comunque
+        # una chiave non vuota, anche se non viene verificata.
+        if not key and spec.get("auth") == "none":
+            key = "local"
         return base, key, (prov.get("model") or "").strip()
 
     @staticmethod
@@ -518,6 +620,9 @@ class Registry:
                     # alla chat sia al RAG manderebbe un LLM alla /embeddings.
                     "embed_model": (prov.get("embed_model") or "").strip(),
                     "api_key": (prov.get("api_key") or "").strip()}
+            # Attivazione SSH per-provider (sovrascrive il default del tipo); assente = usa il tipo.
+            if isinstance(prov.get("activation"), dict) and prov["activation"]:
+                voce["activation"] = prov["activation"]
             data["providers"].append(voce)
             self.save(data)
             return voce
@@ -541,9 +646,39 @@ class Registry:
             for k in ("name", "base_url", "model", "embed_model", "api_key"):
                 if k in campi:
                     prov[k] = (campi[k] or "").strip()
+            # `activation` è un dict, non una stringa: lo si imposta o lo si azzera.
+            if "activation" in campi:
+                act = campi["activation"]
+                if isinstance(act, dict) and act:
+                    prov["activation"] = act
+                else:
+                    prov.pop("activation", None)
             self.save(data)
             self._models_cache.pop(pid, None)
             return prov
+
+    # --- attivazione on-demand (SSH) ---------------------------------------
+
+    def _activation(self, pid: str) -> dict:
+        prov = self._find(self.load(), pid)
+        if prov is None:
+            raise KeyError(pid)
+        act = activation_of(prov, TYPES.get(prov.get("type") or "", {}))
+        if act is None:
+            raise ValueError(f"il provider '{pid}' non ha un'attivazione SSH")
+        return act
+
+    def activate(self, pid: str) -> tuple[bool, str]:
+        """Accende via SSH il server del provider (idempotente) e attende /health."""
+        return activate_server(self._activation(pid))
+
+    def deactivate(self, pid: str) -> tuple[bool, str]:
+        """Spegne via SSH il server del provider, liberando la VRAM."""
+        return stop_server(self._activation(pid))
+
+    def is_active(self, pid: str) -> bool:
+        """True se il server del provider risponde su /health."""
+        return server_up(self._activation(pid).get("health_url") or "")
 
     def remove(self, pid: str) -> None:
         with self._lock:

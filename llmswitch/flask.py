@@ -9,13 +9,16 @@
 
 Espone, sotto `url_prefix` (default `/llm`):
 
-    GET    /providers              registro senza segreti + tipi + assegnazioni
-    POST   /providers              aggiunge {type, name?, base_url?, api_key?}
-    PUT    /providers/<id>         aggiorna name | base_url | model | api_key
-    DELETE /providers/<id>         rimuove (e libera i consumatori agganciati)
-    GET    /providers/<id>/models  modelli, `?refresh=1` salta la cache
-    POST   /providers/<id>/test    prova la connessione
-    POST   /assign                 {consumer, provider} — provider null = stacca
+    GET    /providers                 registro senza segreti + tipi + assegnazioni
+    POST   /providers                 aggiunge {type, name?, base_url?, api_key?, activation?}
+    PUT    /providers/<id>            aggiorna name | base_url | model | api_key | activation
+    DELETE /providers/<id>            rimuove (e libera i consumatori agganciati)
+    GET    /providers/<id>/models     modelli, `?refresh=1` salta la cache
+    POST   /providers/<id>/test       prova la connessione
+    POST   /providers/<id>/activate   accende via SSH il server on-demand (es. Bonsai)
+    POST   /providers/<id>/deactivate lo spegne, liberando la VRAM
+    GET    /providers/<id>/active     {active: bool} — /health del server
+    POST   /assign                    {consumer, provider} — provider null = stacca
 
 Le credenziali non escono mai: di una chiave si sa solo se c'è.
 """
@@ -75,6 +78,36 @@ def make_blueprint(registry: Registry, name: str = "llmswitch",
     @bp.post("/providers/<pid>/test")
     def prova(pid: str):
         return jsonify(registry.test(pid))
+
+    # --- attivazione on-demand (server via SSH, es. Bonsai) ---------------
+    @bp.post("/providers/<pid>/activate")
+    def attiva(pid: str):
+        try:
+            ok, msg = registry.activate(pid)
+        except KeyError:
+            return jsonify({"error": f"provider '{pid}' non trovato"}), 404
+        except ValueError as e:  # provider senza attivazione SSH
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"ok": ok, "message": msg}), (200 if ok else 502)
+
+    @bp.post("/providers/<pid>/deactivate")
+    def disattiva(pid: str):
+        try:
+            ok, msg = registry.deactivate(pid)
+        except KeyError:
+            return jsonify({"error": f"provider '{pid}' non trovato"}), 404
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"ok": ok, "message": msg}), (200 if ok else 502)
+
+    @bp.get("/providers/<pid>/active")
+    def stato_attivo(pid: str):
+        try:
+            return jsonify({"active": registry.is_active(pid)})
+        except KeyError:
+            return jsonify({"error": f"provider '{pid}' non trovato"}), 404
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
     @bp.post("/assign")
     def assegna():
