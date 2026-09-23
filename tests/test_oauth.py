@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -24,6 +25,16 @@ def _jwt(scade_fra_ore: float) -> str:
     corpo = json.dumps({"exp": int(time.time() + scade_fra_ore * 3600)}).encode()
     mezzo = base64.urlsafe_b64encode(corpo).rstrip(b"=").decode()
     return f"testa.{mezzo}.firma"
+
+
+@pytest.fixture(autouse=True)
+def clienti_isolati(tmp_path: Path, monkeypatch) -> Path:
+    """Nessun test legge i client configurati sulla macchina di chi li esegue."""
+    file = tmp_path / "oauth_clients.json"
+    monkeypatch.setattr(oauth, "percorso_clienti", lambda: file)
+    for nome in [n for n in os.environ if n.startswith("LLMSWITCH_")]:
+        monkeypatch.delenv(nome)
+    return file
 
 
 @pytest.fixture()
@@ -227,6 +238,57 @@ def test_a_refused_renewal_says_what_to_do_without_leaking_the_token(
 def test_a_renewal_without_a_refresh_token_fails_clearly(piano: Abbonamento) -> None:
     with pytest.raises(OAuthError, match="rifare l'accesso"):
         oauth.rinnova(piano, Credenziali(access_token="solo-questo"))
+
+
+# ---- client degli strumenti ufficiali ------------------------------------------------
+
+
+def test_no_subscription_carries_client_credentials_in_the_code() -> None:
+    """Il codice è pubblico: gli id dei client ufficiali si leggono dalla macchina."""
+    for a in oauth.ABBONAMENTI.values():
+        assert (a.client_id, a.client_secret) == ("", ""), a.id
+
+
+def test_the_client_is_read_from_the_local_file(
+    piano: Abbonamento, clienti_isolati: Path
+) -> None:
+    clienti_isolati.write_text(json.dumps(
+        {"finto": {"client_id": "dal-file", "client_secret": "s-dal-file"}}), encoding="utf-8")
+    assert oauth.cliente(replace(piano, client_id="")) == ("dal-file", "s-dal-file")
+
+
+def test_the_environment_beats_the_file(
+    piano: Abbonamento, clienti_isolati: Path, monkeypatch
+) -> None:
+    clienti_isolati.write_text(json.dumps({"finto": {"client_id": "dal-file"}}),
+                               encoding="utf-8")
+    monkeypatch.setenv("LLMSWITCH_FINTO_CLIENT_ID", "da-env")
+    assert oauth.cliente(piano)[0] == "da-env"
+
+
+def test_an_unreadable_clients_file_is_not_an_error(
+    piano: Abbonamento, clienti_isolati: Path
+) -> None:
+    clienti_isolati.write_text("[1, 2", encoding="utf-8")
+    assert oauth.cliente(piano) == ("cid", "")
+
+
+def test_a_renewal_without_a_client_says_where_to_put_it(piano: Abbonamento) -> None:
+    senza = replace(piano, client_id="")
+    _scrivi_file(senza, {"access_token": "vecchio", "refresh_token": "r"})
+    with pytest.raises(OAuthError, match="LLMSWITCH_FINTO_CLIENT_ID"):
+        oauth.rinnova(senza, oauth.leggi(senza))
+
+
+def test_without_a_client_the_status_is_not_renewable(
+    piano: Abbonamento, monkeypatch
+) -> None:
+    senza = replace(piano, client_id="")
+    monkeypatch.setitem(oauth.ABBONAMENTI, "finto", senza)
+    _scrivi_file(senza, {"access_token": "t", "refresh_token": "r"})
+    quadro = oauth.stato("finto")
+    assert quadro["client_configurato"] is False
+    assert quadro["rinnovabile"] is False
 
 
 # ---- la cascata ----------------------------------------------------------------------

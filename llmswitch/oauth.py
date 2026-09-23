@@ -19,6 +19,10 @@ morta e un errore incomprensibile alla prima esecuzione. La riscrittura è atomi
 volta lascia una copia di sicurezza accanto all'originale.
 
 Qui dentro non si scrive mai un token in un log, né in un messaggio d'errore.
+
+**I `client_id` e `client_secret` degli strumenti ufficiali non stanno nel codice.** Si
+leggono dalla macchina — variabili d'ambiente o `oauth_clients.json` accanto al registro,
+vedi ``cliente`` — così un repository pubblico non porta credenziali di nessuno.
 """
 
 from __future__ import annotations
@@ -57,8 +61,9 @@ class Abbonamento:
     #: Percorso dei campi dentro il JSON: ``()`` se stanno in cima, ``("tokens",)`` se annidati.
     dentro: tuple[str, ...] = ()
     token_url: str = ""
+    #: Vuoti negli abbonamenti di serie: si leggono dalla configurazione locale, vedi
+    #: ``cliente``. Qui restano per chi costruisce un ``Abbonamento`` da sé.
     client_id: str = ""
-    #: I client "installed" ne hanno uno, ma non è un segreto: sta nel loro codice pubblico.
     client_secret: str = ""
     #: Endpoint con cui si parla ai modelli una volta autenticati.
     inference_base_url: str = ""
@@ -228,6 +233,45 @@ def leggi(a: Abbonamento) -> Credenziali | None:
     )
 
 
+def percorso_clienti() -> Path:
+    """``oauth_clients.json``, nella cartella di configurazione di llmswitch.
+
+    Forma: ``{"gemini_oauth": {"client_id": "…", "client_secret": "…"}, …}``. Sta accanto
+    al registro dei provider, fuori da ogni progetto e quindi fuori dai commit.
+    """
+    from .providers import default_registry_path
+
+    return default_registry_path().parent / "oauth_clients.json"
+
+
+def cliente(a: Abbonamento) -> tuple[str, str]:
+    """``(client_id, client_secret)`` con cui chiedere token per conto dell'abbonamento.
+
+    Nell'ordine: le variabili ``LLMSWITCH_<ID>_CLIENT_ID`` e ``LLMSWITCH_<ID>_CLIENT_SECRET``
+    (``<ID>`` è l'id in maiuscolo, es. ``GEMINI_OAUTH``), poi ``percorso_clienti()``, poi i
+    campi dell'``Abbonamento``. Un valore mancante resta ``""``: sarà chi lo usa a dirlo.
+    """
+    prefisso = f"LLMSWITCH_{a.id.upper()}_"
+    try:
+        tutti = json.loads(percorso_clienti().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        tutti = {}
+    voce = tutti.get(a.id) if isinstance(tutti, dict) else None
+    voce = voce if isinstance(voce, dict) else {}
+    client_id = (os.environ.get(prefisso + "CLIENT_ID")
+                 or str(voce.get("client_id") or "") or a.client_id)
+    client_secret = (os.environ.get(prefisso + "CLIENT_SECRET")
+                     or str(voce.get("client_secret") or "") or a.client_secret)
+    return client_id.strip(), client_secret.strip()
+
+
+def _manca_cliente(a: Abbonamento) -> OAuthError:
+    return OAuthError(
+        f"{a.label}: manca il client_id dello strumento ufficiale. Mettilo in "
+        f"{percorso_clienti()} sotto «{a.id}», oppure in LLMSWITCH_{a.id.upper()}_CLIENT_ID."
+    )
+
+
 def installato(a: Abbonamento) -> bool:
     """Vero se lo strumento ufficiale è sulla macchina. Non è necessario, ma spiega molto."""
     import shutil as _sh
@@ -289,16 +333,19 @@ def rinnova(a: Abbonamento, cred: Credenziali) -> Credenziali:
 
     if not cred.refresh_token:
         raise OAuthError(f"{a.label}: nessun refresh token, serve rifare l'accesso")
-    if not a.token_url or not a.client_id:
+    if not a.token_url:
         raise OAuthError(f"{a.label}: non so a chi chiedere il rinnovo")
+    client_id, client_secret = cliente(a)
+    if not client_id:
+        raise _manca_cliente(a)
 
     dati = {
         "grant_type": "refresh_token",
         "refresh_token": cred.refresh_token,
-        "client_id": a.client_id,
+        "client_id": client_id,
     }
-    if a.client_secret:
-        dati["client_secret"] = a.client_secret
+    if client_secret:
+        dati["client_secret"] = client_secret
     try:
         risposta = requests.post(
             a.token_url, data=dati,
@@ -354,7 +401,10 @@ def login_device(a: Abbonamento, *, attesa_massima_s: float = 600.0,
             f"{a.label}: non espone l'accesso a codice. Fai l'accesso una volta con "
             f"«{a.login_manuale or a.comando}»: da lì in poi la credenziale si rinnova da sola."
         )
-    richiesta = {"client_id": a.client_id}
+    client_id = cliente(a)[0]
+    if not client_id:
+        raise _manca_cliente(a)
+    richiesta = {"client_id": client_id}
     if a.scope:
         richiesta["scope"] = a.scope
     try:
@@ -388,7 +438,7 @@ def login_device(a: Abbonamento, *, attesa_massima_s: float = 600.0,
             esito = requests.post(a.token_url, data={
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 "device_code": device_code,
-                "client_id": a.client_id,
+                "client_id": client_id,
             }, headers={"User-Agent": USER_AGENT}, timeout=30)
             payload = esito.json()
         except (requests.RequestException, ValueError):
@@ -470,6 +520,7 @@ def stato(nome: str) -> dict[str, Any]:
         return {"id": nome, "esiste": False}
     cred = leggi(a)
     ore = cred.scade_fra() if cred else 0.0
+    client_id = cliente(a)[0]
     return {
         "id": a.id,
         "label": a.label,
@@ -480,7 +531,9 @@ def stato(nome: str) -> dict[str, Any]:
         # Con un impedimento noto la credenziale resta valida, ma non porta da nessuna parte.
         "utilizzabile": bool(cred and cred.valide(a.margine_s)) and not a.impedimento,
         "impedimento": a.impedimento,
-        "rinnovabile": bool(cred and cred.refresh_token),
+        # Senza client_id il refresh token c'è ma non si sa a nome di chi presentarlo.
+        "rinnovabile": bool(cred and cred.refresh_token and client_id),
+        "client_configurato": bool(client_id),
         "scade_fra_ore": None if ore == float("inf") else round(ore, 1),
         "accesso_da_qui": bool(a.device_code_url),
         "come_accedere": a.login_manuale or a.comando,

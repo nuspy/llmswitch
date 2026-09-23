@@ -128,6 +128,21 @@ all'originale.
 Ci si presenta sempre come `llmswitch/<versione>`. Fingersi il client ufficiale
 altrui per aggirarne i controlli è ciò che fa sospendere gli account.
 
+Rinnovo e login chiedono il `client_id` (e per Gemini il `client_secret`) dello
+strumento ufficiale. Il codice non li porta: si leggono dalla macchina, prima
+dalle variabili `LLMSWITCH_<ID>_CLIENT_ID` / `LLMSWITCH_<ID>_CLIENT_SECRET`
+(es. `LLMSWITCH_GEMINI_OAUTH_CLIENT_ID`), poi da `oauth_clients.json` nella
+cartella di configurazione di llmswitch (`%LOCALAPPDATA%\llmswitch\` o
+`~/.config/llmswitch/`):
+
+```json
+{"gemini_oauth": {"client_id": "…", "client_secret": "…"},
+ "codex_oauth":  {"client_id": "…"}}
+```
+
+Senza, le credenziali ancora valide funzionano lo stesso; è il rinnovo a dire
+cosa manca e dove metterlo. `stato()` lo segnala con `client_configurato`.
+
 ## Agenti CLI
 
 `llmswitch.agents` esegue gli strumenti che non hanno un endpoint:
