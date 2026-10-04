@@ -23,3 +23,7 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["llmswitch*"]
+
+[tool.setuptools.package-data]
+# Il menu a tendina di riferimento del ragionamento, servito dal blueprint Flask.
+llmswitch = ["static/*.js"]

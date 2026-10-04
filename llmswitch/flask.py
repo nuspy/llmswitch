@@ -10,8 +10,8 @@
 Espone, sotto `url_prefix` (default `/llm`):
 
     GET    /providers                 registro senza segreti + tipi + assegnazioni
-    POST   /providers                 aggiunge {type, name?, base_url?, api_key?, activation?}
-    PUT    /providers/<id>            aggiorna name | base_url | model | api_key | activation
+    POST   /providers                 aggiunge {type, name?, base_url?, api_key?, activation?, reasoning_level?}
+    PUT    /providers/<id>            aggiorna name | base_url | model | api_key | activation | reasoning_level
     DELETE /providers/<id>            rimuove (e libera i consumatori agganciati)
     GET    /providers/<id>/models     modelli, `?refresh=1` salta la cache
     POST   /providers/<id>/test       prova la connessione
@@ -19,6 +19,8 @@ Espone, sotto `url_prefix` (default `/llm`):
     POST   /providers/<id>/deactivate lo spegne, liberando la VRAM
     GET    /providers/<id>/active     {active: bool} — /health del server
     POST   /assign                    {consumer, provider} — provider null = stacca
+    GET    /reasoning-levels          le scelte del menu del ragionamento (`?lang=en`, `?inherit=0`)
+    GET    /static/livello-ragionamento.js   il menu a tendina di riferimento, senza dipendenze
 
 Le credenziali non escono mai: di una chiave si sa solo se c'è.
 """
@@ -28,6 +30,7 @@ import logging
 
 from flask import Blueprint, jsonify, request
 
+from . import reasoning
 from .providers import Registry
 
 log = logging.getLogger("llmswitch.flask")
@@ -35,7 +38,8 @@ log = logging.getLogger("llmswitch.flask")
 
 def make_blueprint(registry: Registry, name: str = "llmswitch",
                    url_prefix: str = "/llm") -> Blueprint:
-    bp = Blueprint(name, __name__, url_prefix=url_prefix)
+    # `static_folder`: il componente di riferimento del menu del ragionamento, servito sotto `<url_prefix>/static/`.
+    bp = Blueprint(name, __name__, url_prefix=url_prefix, static_folder="static")
 
     @bp.get("/providers")
     def elenco():
@@ -56,6 +60,8 @@ def make_blueprint(registry: Registry, name: str = "llmswitch",
             registry.update(pid, request.get_json(silent=True) or {})
         except KeyError:
             return jsonify({"error": f"provider '{pid}' non trovato"}), 404
+        except ValueError as e:  # un livello di ragionamento sconosciuto
+            return jsonify({"error": str(e)}), 400
         return jsonify(registry.public())
 
     @bp.delete("/providers/<pid>")
@@ -120,5 +126,15 @@ def make_blueprint(registry: Registry, name: str = "llmswitch",
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         return jsonify(registry.public())
+
+    @bp.get("/reasoning-levels")
+    def livelli_ragionamento():
+        """Le scelte del menu a tendina: `inherit` e i sette livelli, con l'etichetta nella lingua chiesta."""
+        lingua = (request.args.get("lang") or "it").strip().lower()
+        con_eredita = request.args.get("inherit") not in ("0", "false", "no")
+        return jsonify({
+            "levels": reasoning.choices(lingua, inherit=con_eredita),
+            "default": reasoning.INHERIT if con_eredita else "none",
+        })
 
     return bp

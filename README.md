@@ -88,6 +88,81 @@ modello**: la regola della VRAM si limita a guardare cosa c'è in memoria. Serve
 programmi che non devono prendersi la VRAM di iniziativa propria — quella
 decisione è dell'utente, non dell'applicazione.
 
+### Livello di ragionamento
+
+Quanto pensa un modello prima di rispondere si sceglie **per fornitore** (il suo
+predefinito) e **per richiesta**, con un solo vocabolario:
+
+| valore | significato |
+|---|---|
+| `inherit` | per una richiesta: quello del fornitore; per un fornitore: non dire niente al server |
+| `none` | niente ragionamento |
+| `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | sempre di più |
+
+Il livello diventa parametri in **un punto solo** (`llmswitch.reasoning`), secondo
+il tipo di fornitore:
+
+| dialetto | fornitori | cosa si manda |
+|---|---|---|
+| `effort` | OpenAI e OpenAI-compatibili (Nebius, LM Studio, vLLM, llama.cpp, DeepSeek…) | `reasoning_effort: <livello>` |
+| `thinking` | NVIDIA NIM | `chat_template_kwargs.enable_thinking` + `reasoning_budget` (512 … 32 000) |
+| `anthropic` | Claude | `thinking: {type: "enabled", budget_tokens: N}`; con `none` niente |
+| `none` | CLI ad abbonamento, Cloud Code | niente |
+
+**Mai parametri in conflitto**: le vecchie chiavi del ragionamento nei parametri di
+base si tolgono sempre, e si scrivono solo quelle del dialetto. LM Studio rispetta
+solo `none` (verificato a ottobre 2026): con gli altri livelli ragiona come sa.
+
+```python
+reg.add({"type": "nebius", "api_key": "...", "model": "...", "reasoning_level": "medium"})
+reg.assign("chat", "nebius")
+
+r = reg.reasoning_for("chat", "none", max_tokens=400)          # richiesta: niente ragionamento
+r = reg.reasoning_for("chat", max_tokens=2600)                  # eredita `medium` dal fornitore
+# {"level": "medium", "dialect": "effort", "params": {"reasoning_effort": "medium"}, "max_tokens": 10792}
+corpo = {"model": model, "messages": [...], "max_tokens": r["max_tokens"], **r["params"]}
+```
+
+`max_tokens` torna già **alzato del margine del livello** (`reasoning.MARGIN`,
+da 2 048 per `minimal` a 32 768 per `max`): il ragionamento consuma lo stesso tetto
+della risposta, e senza margine il modello pensa fino al tetto e la risposta resta
+vuota. `reasoning.max_tokens_for(..., margins={...})` accetta margini propri.
+
+Una voce del registro scritta prima dei livelli, col vecchio booleano (`ragiona`,
+`reasoning` o `thinking`), si legge come `medium` (vero) o `none` (falso) e si salva
+nella forma nuova alla prima scrittura.
+
+#### Il menu a tendina
+
+llmswitch non ha un'interfaccia, ma dice cosa mostrare: `public()` porta
+`reasoning_levels` (le scelte, con l'etichetta) e per ogni fornitore
+`reasoning_level` e `reasoning_dialect` (con `none` il menu va disabilitato); il
+blueprint espone anche `GET /llm/reasoning-levels` (`?lang=en`, `?inherit=0` per
+togliere «eredita»).
+
+Il componente di riferimento, **senza dipendenze**, sta in
+`llmswitch/static/livello-ragionamento.js` e il blueprint lo serve su
+`/llm/static/livello-ragionamento.js`. È un `<select>` vero con la sua `<label>`:
+tastiera, lettore di schermo e dito funzionano senza altro; corpo a 16 px (iOS non
+ingrandisce al tocco), almeno 48 px d'altezza, focus visibile, descrizione collegata
+con `aria-describedby`.
+
+```html
+<div data-llmswitch-ragionamento data-base="/llm" data-lang="it" data-value="medium"
+     data-label="Ragionamento" data-name="reasoning_level"
+     data-description="Quanto pensa il modello prima di rispondere."></div>
+<script type="module" src="/llm/static/livello-ragionamento.js"></script>
+<script>
+  document.addEventListener("llmswitch:ragionamento", (e) =>
+    fetch("/llm/providers/nebius", {method: "PUT", headers: {"Content-Type": "application/json"},
+                                    body: JSON.stringify({reasoning_level: e.detail.valore})}));
+</script>
+```
+
+Oppure da codice: `import { caricaLivelli, menuRagionamento } from ".../livello-ragionamento.js"`,
+poi `menuRagionamento({livelli, valore, etichetta, descrizione, onChange})` restituisce
+l'elemento da inserire. Se il server non risponde usa le scelte predefinite.
+
 ## Provider supportati
 
 | famiglia | tipi | autenticazione |

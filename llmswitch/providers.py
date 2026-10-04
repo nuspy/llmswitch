@@ -42,6 +42,7 @@ from pathlib import Path
 
 import requests
 
+from . import reasoning
 from .local import LmStudioConfig, LocalEngines, VllmConfig
 
 log = logging.getLogger("llmswitch.providers")
@@ -394,6 +395,9 @@ class Registry:
             return self._empty()
         data.setdefault("providers", [])
         data.setdefault("assignments", {})
+        for prov in data["providers"]:
+            if isinstance(prov, dict):
+                _migra_ragionamento(prov)
         return data
 
     def save(self, data: dict) -> None:
@@ -600,6 +604,29 @@ class Registry:
         chiave = risolto[1] if risolto else ""
         return {"Authorization": f"Bearer {chiave}"} if chiave else {}
 
+    def reasoning_for(self, consumer: str, level: str = reasoning.INHERIT, *,
+                      base: dict | None = None, max_tokens: int | None = None) -> dict:
+        """Il ragionamento di una richiesta al fornitore assegnato a `consumer`: il punto unico in cui un livello
+        diventa parametri (`llmswitch.reasoning`).
+
+        `level` è quello della richiesta (`inherit`: quello del fornitore). Restituisce
+        `{"level", "dialect", "params", "max_tokens"}`: `params` sono i campi da fondere nel corpo della richiesta
+        (`base`, se c'è, senza le sue vecchie chiavi del ragionamento: mai due dialetti insieme); `max_tokens` è il tetto
+        visibile più il margine del livello, se si è passato `max_tokens`. `level` nel risultato è `None` quando anche
+        il fornitore eredita: non si manda niente e decide il server."""
+        if not reasoning.valid(level):
+            raise ValueError(f"livello di ragionamento sconosciuto: {level!r}")
+        prov = self.provider_for(consumer) or {}
+        spec = TYPES.get(prov.get("type") or "", {})
+        dialetto = reasoning.dialect(prov.get("type") or "", spec.get("api", ""))
+        livello = reasoning.resolve(prov.get("reasoning_level"), level)
+        if dialetto == reasoning.NO_DIALECT:
+            # Un CLI ad abbonamento non ha parametri per il ragionamento: niente da mandare.
+            return {"level": livello, "dialect": dialetto, "params": dict(base or {}), "max_tokens": max_tokens}
+        params = reasoning.params_for(livello, dialetto, base)
+        tetto = reasoning.max_tokens_for(max_tokens, livello, params) if max_tokens else max_tokens
+        return {"level": livello, "dialect": dialetto, "params": params, "max_tokens": tetto}
+
     # --- modifica ----------------------------------------------------------
 
     def add(self, prov: dict) -> dict:
@@ -623,6 +650,13 @@ class Registry:
             # Attivazione SSH per-provider (sovrascrive il default del tipo); assente = usa il tipo.
             if isinstance(prov.get("activation"), dict) and prov["activation"]:
                 voce["activation"] = prov["activation"]
+            # Il livello di ragionamento predefinito del fornitore (`inherit`: non si dice niente al server). Una voce
+            # scritta col vecchio booleano (`ragiona`…) diventa `medium`/`none`.
+            voce["reasoning_level"] = _livello_ammesso(prov.get("reasoning_level"))
+            if "reasoning_level" not in prov:
+                vecchio = {k: prov[k] for k in reasoning.LEGACY_BOOL_KEYS if isinstance(prov.get(k), bool)}
+                if vecchio:
+                    voce["reasoning_level"] = reasoning.from_bool(next(iter(vecchio.values())))
             data["providers"].append(voce)
             self.save(data)
             return voce
@@ -646,6 +680,8 @@ class Registry:
             for k in ("name", "base_url", "model", "embed_model", "api_key"):
                 if k in campi:
                     prov[k] = (campi[k] or "").strip()
+            if "reasoning_level" in campi:
+                prov["reasoning_level"] = _livello_ammesso(campi["reasoning_level"])
             # `activation` è un dict, non una stringa: lo si imposta o lo si azzera.
             if "activation" in campi:
                 act = campi["activation"]
@@ -728,13 +764,41 @@ class Registry:
                 "note": spec.get("note", ""),
                 "realtime": spec.get("api") != "cli",
                 "command": spec.get("command", ""),
+                "reasoning_level": reasoning.normalize(p.get("reasoning_level")),
+                "reasoning_dialect": reasoning.dialect(p.get("type") or "", spec.get("api", "")),
             })
         return {"providers": fuori, "assignments": data.get("assignments", {}),
                 "types": [{"type": k, "realtime": v.get("api") != "cli",
+                           "reasoning_dialect": reasoning.dialect(k, v.get("api", "")),
                            **{kk: vv for kk, vv in v.items()
                               if kk in ("label", "auth", "local", "base_url", "note")}}
                           for k, v in TYPES.items()],
-                "consumers": list(self.consumers)}
+                "consumers": list(self.consumers),
+                # Le scelte del menu a tendina del ragionamento (`static/livello-ragionamento.js`).
+                "reasoning_levels": reasoning.choices("it")}
+
+
+def _livello_ammesso(valore) -> str:
+    """Il livello di ragionamento di una voce: vuoto o assente → `inherit`; uno sconosciuto è un errore."""
+    if valore is None or (isinstance(valore, str) and not valore.strip()):
+        return reasoning.INHERIT
+    pulito = valore.strip().lower() if isinstance(valore, str) else valore
+    if not reasoning.valid(pulito):
+        raise ValueError(f"livello di ragionamento sconosciuto: {valore!r} "
+                         f"(ammessi: {', '.join(reasoning.CHOICES)})")
+    return pulito
+
+
+def _migra_ragionamento(prov: dict) -> None:
+    """Una voce scritta prima dei livelli: il vecchio booleano (`ragiona`, `reasoning`, `thinking`) diventa
+    `reasoning_level` (`medium`/`none`) e sparisce. Si salva alla prossima scrittura del registro."""
+    vecchie = [k for k in reasoning.LEGACY_BOOL_KEYS if isinstance(prov.get(k), bool)]
+    if not vecchie:
+        return
+    if not reasoning.valid(prov.get("reasoning_level")):
+        prov["reasoning_level"] = reasoning.from_bool(prov[vecchie[0]])
+    for k in vecchie:
+        prov.pop(k)
 
 
 # --- elenchi modelli per famiglia di API --------------------------------------

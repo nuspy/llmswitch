@@ -32,6 +32,7 @@ from .oauth import (
     stato,
 )
 from .providers import TYPES, Registry, default_registry_path
+from . import reasoning
 
 __version__ = "0.1.0"
 
@@ -44,4 +45,6 @@ __all__ = [
     "access_token", "credenziali", "intestazioni", "panoramica", "stato",
     # CLI-agenti: gli abbonamenti che non hanno un endpoint, ma un programma.
     "AGENTI", "Agente", "AgentError", "genera", "installati",
+    # Il livello di ragionamento (`none` … `max`, `inherit`) e i parametri giusti per ogni tipo di fornitore.
+    "reasoning",
 ]
