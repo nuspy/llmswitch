@@ -36,6 +36,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 log = logging.getLogger("llmswitch.local")
 
@@ -211,12 +212,32 @@ class LocalEngines:
         cli = self.lms_cli()
         if not cli:
             return None
+        if not self._cli_serves_this_address(cli):
+            # L'API nativa non risponde e il server di LM Studio non è questo indirizzo: è un altro
+            # programma (Basalt, un llama-server…). `lms ps` descriverebbe la memoria di LM Studio,
+            # che non c'entra: «non so» (None), mai «nessun modello» — che autorizzerebbe a caricarne uno.
+            return None
         data = _lms_json(cli, ["ps"], _LMS_QUICK_TIMEOUT)
         if isinstance(data, dict):
             data = data.get("models") or data.get("loaded") or []
         if data is None:
             return None                      # CLI muta o in timeout
         return _model_ids(data)
+
+    def _cli_serves_this_address(self, cli: str) -> bool:
+        """Il server locale di LM Studio ascolta sulla porta di ``base_url``?
+
+        Serve solo quando ``/api/v0/models`` non risponde (LM Studio vecchio, o un altro server):
+        ``lms server status`` è una lettura e non sveglia niente. Se la CLI non lo sa dire si
+        resta sul comportamento di prima, cioè ci si fida della CLI.
+        """
+        data = _lms_json(cli, ["server", "status"], _LMS_QUICK_TIMEOUT)
+        if not isinstance(data, dict) or "running" not in data:
+            return True
+        if not data.get("running"):
+            return False
+        porta = urlparse(self.lm.base_url or "").port
+        return porta is None or not data.get("port") or int(data["port"]) == porta
 
     def busy(self) -> list[str]:
         """Modelli in stato transitorio: stanno già prendendosi la VRAM."""
